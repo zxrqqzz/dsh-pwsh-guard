@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-27",
+  "notes": [
+    "规则是数据不是代码：改规则只改本文件（或用 config.rulesFile 指向外部文件），不必改代码。",
+    "每条规则的 samples.hit / samples.miss 就是回归用例（test/rules.test.js 全量跑）：hit 不得被 allowlist 命中，miss 不得被任何规则命中；改规则必须同时改样本。",
+    "severity=high 才允许 deny（mode=guard）；mode=strict 时 medium 也 deny；mode=learn 一律只提示不拦。",
+    "所有 fast 字段都必须是本机沙箱里真能跑的写法：不得出现 rg / fd / git / node -e（原因见 docs/02-实测依据.md 的 B 节）。",
+    "逃生口：命令里带 # pwsh-guard:allow 时，本插件对该条命令不拦、不提示、不计时。"
+  ],
+  "allowlist": [
+    {
+      "id": "has-filter",
+      "regex": "-(?:Filter|Include)\\s+[^\\s|;]+",
+      "why": "provider 层过滤，已经把枚举范围压到最小"
+    },
+    {
+      "id": "has-depth",
+      "regex": "-Depth\\s+\\d+",
+      "why": "限定了递归深度，规模可控"
+    },
+    {
+      "id": "single-file-read",
+      "regex": "(?:Get-Content|Select-String)[^|;\\n]*-Path\\s+[\"']?[^\\s\"';*]+\\.[A-Za-z0-9]+[\"']?(?:\\s|$)",
+      "why": "显式单文件路径，不涉及枚举"
+    },
+    {
+      "id": "streaming-head",
+      "regex": "-TotalCount\\s+\\d+",
+      "why": "已经是流式截断"
+    },
+    {
+      "id": "list-mode",
+      "regex": "Select-String[^|;\\n]*-List\\b",
+      "why": "命中即停"
+    }
+  ],
+  "rules": [
+    {
+      "id": "gci-recurse-nofilter",
+      "family": "search",
+      "severity": "high",
+      "when": "Get-ChildItem/别名 带 -Recurse，但整条命令没有 -Filter / -Depth / -LiteralPath 限定",
+      "regex": "(?:Get-ChildItem|\\bgci\\b)(?=[^\\n|;]*\\s-Recurse\\b)(?![^\\n|;]*-(?:Filter|Depth)\\b)",
+      "bumpWhen": ["node_modules", "$env:USERPROFILE", "C:\\\\Windows", "^\\s*[A-Z]:\\\\\\s"],
+      "why": "递归枚举会把每个文件对象化，代价是 O(文件数)。本机 12,357 个 .js 实测 2,693ms；真实仓库带 node_modules 时是几十秒到几分钟。",
+      "measured": "2693 ms / 12357 files",
+      "fast": "[System.IO.Directory]::EnumerateFiles($p,'*.js','AllDirectories')；找文件更该用 glob 工具",
+      "alt": "-Filter *.ext / -Depth N 先把规模压下来；只要路径列表时用 EnumerateFiles（同树实测 1,193ms）",
+      "samples": {
+        "hit": [
+          "Get-ChildItem . -Recurse",
+          "gci C:\\repo -Recurse -File",
+          "Get-ChildItem -Path . -Recurse | Select-Object Name"
+        ],
+        "miss": [
+          "Get-ChildItem . -Recurse -Filter *.js",
+          "Get-ChildItem . -Depth 2 -Recurse",
+          "Get-ChildItem . -File"
+        ]
+      }
+    },
+    {
+      "id": "recurse-then-where",
+      "family": "search",
+      "severity": "high",
+      "when": "-Recurse 之后接 Where-Object / ? 过滤",
+      "regex": "-Recurse\\b[^\\n;]*\\|[^\\n;]*(?:Where-Object|\\bwhere\\b|\\?)",
+      "why": "-Recurse 已经付了枚举代价，Where-Object 再把所有对象过一遍管道；这是「先全量再筛」，最典型的慢写法。",
+      "measured": "推断：比重写为 provider 级过滤慢 3–10 倍（未单独实测）",
+      "fast": "Get-ChildItem -Filter *.json（provider 层过滤）或 [System.IO.Directory]::EnumerateFiles + EndsWith 判断",
+      "alt": "真需要复杂谓词时：EnumerateFiles 拿到路径数组后用 foreach 判 .NET 属性，避免 PSObject 开销",
+      "samples": {
+        "hit": [
+          "Get-ChildItem -Recurse | Where-Object { $_.Name -like '*.json' }",
+          "gci . -Recurse | ? { $_.Length -gt 1MB }"
+        ],
+        "miss": ["Get-ChildItem -Filter *.json | Where-Object { $_.Length -gt 1MB }"]
+      }
+    },
+    {
+      "id": "selectstring-recurse",
+      "family": "search",
+      "severity": "high",
+      "when": "Select-String 带 -Recurse，或 -Recurse 之后管道给 Select-String",
+      "regex": "(?:Select-String[^\\n|;]*-Recurse)|(?:-Recurse\\b[^\\n;]*\\|[^\\n;]*\\bSelect-String\\b)",
+      "why": "等于把整个目录树的每个文件读一遍再正则，比 ripgrep 慢一到两个数量级；而且 DSH 自带 grep 工具跑在宿主进程里，不受沙箱限制。",
+      "measured": "推断：无沙箱实测数字（rg 在壳里无法启动，见 02-B）",
+      "fast": "改用 DSH 的 grep 工具（自带 ripgrep，ms 级）；壳里必须搜索时用 Select-String -Path <显式文件列表> -List",
+      "alt": "只搜已知的几个文件：Select-String -Path a.log,b.log -Pattern x -List",
+      "samples": {
+        "hit": [
+          "Select-String -Path . -Pattern TODO -Recurse",
+          "Get-ChildItem -Recurse | Select-String 'TODO'"
+        ],
+        "miss": ["Select-String -Path .\\a.log -Pattern TODO", "Select-String -InputObject $text -Pattern x"]
+      }
+    },
+    {
+      "id": "getcontent-raw-big",
+      "family": "read",
+      "severity": "medium",
+      "when": "Get-Content 带 -Raw（整文件读进内存，再正则/切分）",
+      "regex": "Get-Content[^\\n|;]*-Raw",
+      "why": "-Raw 一次性把整个文件读成字符串；几百 MB 的日志会直接吃掉内存并卡住几秒到几十秒。",
+      "measured": "推断（未单独实测）",
+      "fast": "Select-String -Path big.log -Pattern x（流式逐行）；只要开头用 Get-Content -TotalCount 50；只要行数用 (Get-Content -ReadCount 0).Count",
+      "alt": "真要全文处理：先 -TotalCount / -ReadCount 0 估规模，再决定",
+      "samples": {
+        "hit": ["$t = Get-Content .\\big.log -Raw", "Get-Content $f -Raw | Select-String 'err'"],
+        "miss": ["Get-Content .\\small.txt", "Get-Content .\\big.log -TotalCount 50"]
+      }
+    },
+    {
+      "id": "measure-after-recurse",
+      "family": "count",
+      "severity": "medium",
+      "when": "-Recurse 之后接 Measure-Object（只是为了计数）",
+      "regex": "-Recurse\\b[^\\n;]*\\|[^\\n;]*\\b(?:Measure-Object|measure)\\b",
+      "why": "为了一个数字付了全量对象化的代价。",
+      "measured": "推断：EnumerateFiles 计数约快 2.3 倍（同树实测 1,193ms vs 2,693ms）",
+      "fast": "@([System.IO.Directory]::EnumerateFiles($p,'*.js','AllDirectories')).Count",
+      "samples": {
+        "hit": ["(Get-ChildItem . -Recurse | Measure-Object).Count", "gci -Recurse | measure"],
+        "miss": ["(Get-ChildItem . -File | Measure-Object).Count"]
+      }
+    },
+    {
+      "id": "getcontent-wait",
+      "family": "block",
+      "severity": "high",
+      "when": "Get-Content -Wait（等价于 tail -f，永不返回）",
+      "regex": "\\b(?:Get-Content|gc)\\b[^\\n|;]*-Wait\\b",
+      "why": "永不结束 → 只会在工具超时处被强杀，白等掉整个超时窗口，还常常连带把输出丢掉。",
+      "measured": "确定性挂起（语义保证）",
+      "fast": "取当前尾部快照：Get-Content f -Tail 100；需要持续观察就改用 job / 让用户自己开终端",
+      "samples": { "hit": ["Get-Content .\\a.log -Wait", "gc .\\a.log -Tail 10 -Wait"], "miss": ["Get-Content .\\a.log -Tail 100"] }
+    },
+    {
+      "id": "interactive-input",
+      "family": "block",
+      "severity": "high",
+      "when": "命令会读标准输入 / 等用户按键（Read-Host、Pause、ReadKey、-Confirm）",
+      "regex": "\\b(?:Read-Host|Pause|ReadKey)\\b|-Confirm\\b",
+      "why": "工具调用没有交互终端：stdin 不会有人回答，命令一直等 → 撞超时。",
+      "measured": "确定性挂起（语义保证）",
+      "fast": "去掉交互：参数直接写死 / 用 -Force / 从环境变量或文件取输入",
+      "samples": {
+        "hit": ["Read-Host 'name'", "Remove-Item .\\x -Confirm", "$Host.UI.RawUI.ReadKey()"],
+        "miss": ["Remove-Item .\\x -Force", "$env:NAME"]
+      }
+    },
+    {
+      "id": "busy-wait-loop",
+      "family": "block",
+      "severity": "high",
+      "when": "while/for 循环里 Start-Sleep 轮询（或 while($true) 空转）",
+      "regex": "(?:while|for)\\s*\\([^)]*\\)[^{\\n]*\\{[^}]*Start-Sleep|while\\s*\\(\\s*\\$true\\s*\\)",
+      "why": "轮询本身不产生进展，只吃满超时；条件不成立时会挂到被强杀。",
+      "measured": "确定性挂起（语义保证）",
+      "fast": "一次检查 + 立即返回；需要等待就交给 job（后台跑，job_output 收）；真想等就显式 -TimeoutSec 并接受失败",
+      "samples": {
+        "hit": ["while (-not (Test-Path $f)) { Start-Sleep 2 }", "while ($true) { }"],
+        "miss": ["Start-Sleep -Seconds 1"]
+      }
+    },
+    {
+      "id": "blocking-wait-process",
+      "family": "block",
+      "severity": "medium",
+      "when": "Wait-Process / Start-Process -Wait 等待一个可能不退出或需要交互的进程",
+      "regex": "\\bWait-Process\\b|-Wait\\b\\s*$",
+      "why": "GUI 程序、服务、等待输入的进程不会自己退出；-Wait 会把工具调用一起挂住。",
+      "measured": "推断（取决于目标进程）",
+      "fast": "改用后台 job + job_output 轮询；或 Start-Process -PassThru 后自己判 $p.HasExited",
+      "samples": {
+        "hit": ["Wait-Process -Name notepad", "Start-Process code -Wait"],
+        "miss": ["Start-Process git -ArgumentList '--version' -PassThru"]
+      }
+    },
+    {
+      "id": "wide-format-output",
+      "family": "output",
+      "severity": "medium",
+      "when": "大结果集直接 Format-Table -AutoSize / Format-List",
+      "regex": "\\b(?:Format-Table|ft)\\b[^\\n|;]*-AutoSize",
+      "why": "不是为了快，是为了别把几千行表格灌进上下文（每个单元格都算 token），还会触发输出截断。",
+      "measured": "n/a（token 问题）",
+      "fast": "Select-Object -First 20 Name,Length 或 | Measure-Object 先看规模",
+      "samples": {
+        "hit": ["Get-ChildItem | Format-Table -AutoSize", "gci | ft -AutoSize"],
+        "miss": ["Get-ChildItem | Select-Object -First 10 Name,Length"]
+      }
+    }
+  ]
+}

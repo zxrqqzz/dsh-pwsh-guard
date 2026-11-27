@@ -1,0 +1,18 @@
+# dsh-pwsh-guard bundle patch.
+#
+# Applied as ONE insert over the profile root, after the base/web bundles.
+# The user's own profile cordis.patch.yml (and any --patch overlays) apply
+# afterwards and may override this row's whole `config` by id.
+#
+# `name` must equal the package.json `name` (the loader resolves the plugin
+# module from the profile's node_modules under that name).
+#
+# `mode` starts at `learn` on purpose: the first install measures and advises
+# only, so a wrong rule cannot block work. Flip it to `guard` once the timing
+# notices look right in a real session.
+- insert:
+    - id: pwsh-guard
+      name: dsh-pwsh-guard
+      config:
+        mode: learn
+        slowMs: 5000

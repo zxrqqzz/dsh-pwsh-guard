@@ -1,0 +1,55 @@
+{
+  "name": "dsh-pwsh-guard",
+  "version": "0.2.0",
+  "description": "DSH plugin: make the agent's PowerShell commands faster. A static efficiency section, a before-execution guard for slow/hanging constructs, and real duration feedback on the tool result.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./types/dsh.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "rules/",
+    "prompt/",
+    "types/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check lib/index.js",
+    "check:host": "node scripts/check-host.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "powershell",
+    "pwsh",
+    "performance",
+    "guard"
+  ],
+  "license": "MIT"
+}
